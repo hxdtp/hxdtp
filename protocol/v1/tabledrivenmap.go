@@ -77,13 +77,17 @@ func (m TableDrivenMap) WriteWith(codec *xdcodec.Codec, tbl KeyTable) error {
 		return xdcodec.ErrExceedContainerCap
 	}
 
-	codec.WriteUint8(uint8(n))
+	if err := codec.WriteUint8(uint8(n)); err != nil {
+		return err
+	}
 	for k, v := range m {
 		id, ok := tbl.mapping[k]
 		if !ok {
 			return fmt.Errorf("key '%s' not found in table", k)
 		}
-		codec.WriteUint8(id)
+		if err := codec.WriteUint8(id); err != nil {
+			return err
+		}
 		if err := codec.WriteTyped(v); err != nil {
 			return err
 		}

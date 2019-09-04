@@ -36,5 +36,5 @@ func TestProtocol(t *testing.T) {
 	m2.SetBody(io.LimitedReader{})
 
 	require.Equal(t, m, m2)
-	require.Equal(t, string(body), string(m2body))
+	require.Equal(t, body, string(m2body))
 }

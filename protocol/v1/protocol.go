@@ -13,10 +13,14 @@ import (
 )
 
 var (
-	Version = protocol.Version{Major: 1, Minor: 0}
+	version = protocol.Version{Major: 1, Minor: 0}
 
 	ErrUnknownRequestType = fmt.Errorf("unknown request type for current version")
 )
+
+func Version() protocol.Version {
+	return version
+}
 
 // TODO(damnever): reuse message
 
@@ -57,7 +61,7 @@ func newProto(transport io.ReadWriter, opts ...protocol.WithOption) protocol.Ver
 }
 
 func (p *proto) Version() protocol.Version {
-	return Version
+	return version
 }
 
 func (p *proto) NewMessage() protocol.Message {
