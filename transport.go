@@ -33,8 +33,8 @@ type bufferedTransport struct {
 	buf   [defaultBufferSize]byte
 }
 
-func newBufferedTransport(conn net.Conn) bufferedTransport {
-	return bufferedTransport{
+func newBufferedTransport(conn net.Conn) *bufferedTransport {
+	return &bufferedTransport{
 		bufrw: bufio.NewReadWriter(
 			bufio.NewReaderSize(conn, defaultBufferSize),
 			bufio.NewWriterSize(conn, defaultBufferSize),
@@ -43,15 +43,15 @@ func newBufferedTransport(conn net.Conn) bufferedTransport {
 	}
 }
 
-func (t bufferedTransport) Read(p []byte) (int, error) {
+func (t *bufferedTransport) Read(p []byte) (int, error) {
 	return t.bufrw.Read(p)
 }
 
-func (t bufferedTransport) Write(p []byte) (int, error) {
+func (t *bufferedTransport) Write(p []byte) (int, error) {
 	return t.bufrw.Write(p)
 }
 
-func (t bufferedTransport) ReadFrom(r io.Reader) (n int64, err error) {
+func (t *bufferedTransport) ReadFrom(r io.Reader) (n int64, err error) {
 	if fsr, ok := r.(fileSender); ok {
 		// Flush pending data before sendfile call.
 		if err = t.bufrw.Flush(); err != nil {
@@ -70,6 +70,6 @@ func (t bufferedTransport) ReadFrom(r io.Reader) (n int64, err error) {
 	return
 }
 
-func (t bufferedTransport) Flush() error {
+func (t *bufferedTransport) Flush() error {
 	return t.bufrw.Flush()
 }

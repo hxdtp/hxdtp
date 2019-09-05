@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/hxdtp/hxdtp/protocol"
-	"github.com/hxdtp/hxdtp/protocol/v1"
+	protov1 "github.com/hxdtp/hxdtp/protocol/v1"
 )
 
 func Example() {
@@ -18,7 +18,7 @@ func Example() {
 	// mapping relation in KeyTable if you do not known what you are
 	// doing, you can mark the useless one as reserved, in other words,
 	// name it as __RESERVED_XX__ until you can safely reuse it.
-	protocol.Register(v1.Version, v1.Builder(v1.WithKeyTable(map[string]uint8{
+	protocol.Register(protov1.Version(), protov1.Builder(protov1.WithKeyTable(map[string]uint8{
 		"Method": 0,
 	})))
 	must := func(err error) {
@@ -55,7 +55,7 @@ func Example() {
 
 	cli, err := NewClient(ClientOptions{
 		RemoteAddr:     addr,
-		ProtoVersion:   v1.Version,
+		ProtoVersion:   protov1.Version(),
 		ConnectTimeout: time.Second,
 		ReadTimeout:    time.Second,
 		WriteTimeout:   time.Second,

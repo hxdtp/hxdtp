@@ -7,6 +7,8 @@ import (
 	"net"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/hxdtp/hxdtp/protocol"
 )
 
@@ -42,11 +44,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := protocol.Connect(opts.ProtoVersion, conn); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	proto, err := protocol.Build(opts.ProtoVersion, newBufferedTransport(conn))
+	proto, err := protocol.Connect(opts.ProtoVersion, newBufferedTransport(conn))
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -78,11 +76,15 @@ func (c *Client) Call(ctx context.Context, req ClientRequest) (ClientResponse, e
 		return nil, ErrSeqIDExhausted
 	}
 
-	c.conn.SetWriteDeadline(time.Now().Add(c.opts.WriteTimeout))
+	if err := c.conn.SetWriteDeadline(time.Now().Add(c.opts.WriteTimeout)); err != nil {
+		return nil, errors.WithStack(err)
+	}
 	if err := c.proto.WriteMessage(clireq.tomsg()); err != nil {
 		return nil, err
 	}
-	c.conn.SetReadDeadline(time.Now().Add(c.opts.ReadTimeout))
+	if err := c.conn.SetReadDeadline(time.Now().Add(c.opts.ReadTimeout)); err != nil {
+		return nil, errors.WithStack(err)
+	}
 	cliresp, err := c.proto.ReadMessage()
 	if err != nil {
 		return nil, err

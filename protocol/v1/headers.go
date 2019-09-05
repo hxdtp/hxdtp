@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/pkg/errors"
+
 	"github.com/hxdtp/xdcodec"
 )
 
@@ -103,12 +105,18 @@ func (h headers) readFrom(codec *xdcodec.Codec) error {
 	if err := h.static.ReadWith(codec, h.keytbl); err != nil {
 		return err
 	}
-	return codec.ReadMap(&h.dynamic)
+	if err := codec.ReadMap(&h.dynamic); err != nil {
+		return errors.WithStack(err)
+	}
+	return nil
 }
 
 func (h headers) writeTo(codec *xdcodec.Codec) error {
 	if err := h.static.WriteWith(codec, h.keytbl); err != nil {
 		return err
 	}
-	return codec.WriteMap(h.dynamic)
+	if err := codec.WriteMap(h.dynamic); err != nil {
+		return errors.WithStack(err)
+	}
+	return nil
 }

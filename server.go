@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/hxdtp/hxdtp/protocol"
 )
 
@@ -57,7 +59,7 @@ type Server struct {
 func NewServer(ctx context.Context, opts ServerOptions) (*Server, error) {
 	l, err := net.Listen("tcp", opts.ListenAddr)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	// TODO(damnever): check if context canceled
 	return &Server{
@@ -74,7 +76,7 @@ func (s *Server) Serve() error {
 	for {
 		conn, err := s.l.Accept()
 		if err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 		s.wg.Add(1)
 		go s.handleConn(conn)
@@ -95,7 +97,7 @@ func (s *Server) Close() error {
 	case <-time.After(s.opts.GracefulTimeout):
 	case <-donec:
 	}
-	return err
+	return errors.WithStack(err)
 }
 
 func (s *Server) handleConn(conn net.Conn) {
@@ -122,7 +124,9 @@ func (s *Server) handleConn(conn net.Conn) {
 func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.VersionedProtocol) {
 	for {
 		func() {
-			conn.SetDeadline(time.Now().Add(s.opts.ReadTimeout))
+			if err := conn.SetDeadline(time.Now().Add(s.opts.ReadTimeout)); err != nil {
+				panic(err)
+			}
 			msg, err := proto.ReadMessage()
 			if err != nil {
 				// TODO: hook for logging/metrics...
@@ -135,7 +139,9 @@ func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.Versione
 			if err := s.opts.HandleFunc(svrctx); err != nil {
 				panic(err)
 			}
-			conn.SetWriteDeadline(time.Now().Add(s.opts.WriteTimeout))
+			if err := conn.SetWriteDeadline(time.Now().Add(s.opts.WriteTimeout)); err != nil {
+				panic(err)
+			}
 			if err := proto.WriteMessage(svrctx.response.tomsg()); err != nil {
 				panic(err)
 			}
@@ -222,12 +228,15 @@ func newServerContext() *serverContext {
 }
 
 func (sctx *serverContext) Reset(stdctx context.Context, req, resp protocol.Message) {
+	if sctx.cancel != nil {
+		sctx.cancel()
+	}
 	if stdctx == nil {
 		sctx.stdctx = nil
 		sctx.cancel = nil
 	} else {
-		stdctx, cancel := context.WithCancel(stdctx)
-		sctx.stdctx = stdctx
+		subctx, cancel := context.WithCancel(stdctx)
+		sctx.stdctx = subctx
 		sctx.cancel = cancel
 	}
 	sctx.request.Message = req
@@ -250,11 +259,16 @@ func (sctx *serverContext) Response() ServerResponse {
 }
 
 func (sctx *serverContext) Set(key string, value interface{}) {
+	sctx.ml.Lock()
 	sctx.meta[key] = value
+	sctx.ml.Unlock()
 }
 
 func (sctx *serverContext) Get(key string) interface{} {
-	return sctx.meta[key]
+	sctx.ml.RLock()
+	val := sctx.meta[key]
+	sctx.ml.RUnlock()
+	return val
 }
 
 type serverContextPool struct {
