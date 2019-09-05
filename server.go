@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/hxdtp/hxdtp/protocol"
 )
 
@@ -57,7 +59,7 @@ type Server struct {
 func NewServer(ctx context.Context, opts ServerOptions) (*Server, error) {
 	l, err := net.Listen("tcp", opts.ListenAddr)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	// TODO(damnever): check if context canceled
 	return &Server{
@@ -74,7 +76,7 @@ func (s *Server) Serve() error {
 	for {
 		conn, err := s.l.Accept()
 		if err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 		s.wg.Add(1)
 		go s.handleConn(conn)
@@ -95,7 +97,7 @@ func (s *Server) Close() error {
 	case <-time.After(s.opts.GracefulTimeout):
 	case <-donec:
 	}
-	return err
+	return errors.WithStack(err)
 }
 
 func (s *Server) handleConn(conn net.Conn) {

@@ -44,11 +44,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = protocol.Connect(opts.ProtoVersion, conn); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	proto, err := protocol.Build(opts.ProtoVersion, newBufferedTransport(conn))
+	proto, err := protocol.Connect(opts.ProtoVersion, newBufferedTransport(conn))
 	if err != nil {
 		conn.Close()
 		return nil, err

@@ -148,7 +148,7 @@ func (p *proto) writeMsg(m message) error {
 	}
 	if f, ok := p.transport.(protocol.Flusher); ok {
 		if err := f.Flush(); err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 	}
 	return nil

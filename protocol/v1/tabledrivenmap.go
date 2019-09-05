@@ -1,15 +1,16 @@
 package v1
 
 import (
-	"errors"
 	"fmt"
+
+	"github.com/pkg/errors"
 
 	"github.com/hxdtp/xdcodec"
 )
 
 var (
-	ErrNotOneToOne   = errors.New("hxdtp/protocol/v1: not one to one relationship")
-	ErrTableTooLarge = errors.New("hxdtp/protocol/v1: table limit 255")
+	ErrNotOneToOne   = fmt.Errorf("hxdtp/protocol/v1: not one to one relationship")
+	ErrTableTooLarge = fmt.Errorf("hxdtp/protocol/v1: table limit 255")
 )
 
 type TableDrivenMap map[string]xdcodec.Typed
@@ -47,7 +48,7 @@ func (m TableDrivenMap) Reset() {
 func (m TableDrivenMap) ReadWith(codec *xdcodec.Codec, tbl KeyTable) error {
 	var nkv uint8
 	if err := codec.ReadUint8(&nkv); err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	if nkv == 0 {
 		return nil
@@ -56,15 +57,15 @@ func (m TableDrivenMap) ReadWith(codec *xdcodec.Codec, tbl KeyTable) error {
 	for i := uint8(0); i < nkv; i++ {
 		var id uint8
 		if err := codec.ReadUint8(&id); err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 		k, ok := tbl.revmapping[id]
 		if !ok {
-			return fmt.Errorf("id '%d' not found in table", id)
+			return errors.Errorf("id '%d' not found in table", id)
 		}
 		v, err := codec.ReadTyped()
 		if err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 		m[k] = v
 	}
@@ -78,7 +79,7 @@ func (m TableDrivenMap) WriteWith(codec *xdcodec.Codec, tbl KeyTable) error {
 	}
 
 	if err := codec.WriteUint8(uint8(n)); err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	for k, v := range m {
 		id, ok := tbl.mapping[k]
@@ -86,10 +87,10 @@ func (m TableDrivenMap) WriteWith(codec *xdcodec.Codec, tbl KeyTable) error {
 			return fmt.Errorf("key '%s' not found in table", k)
 		}
 		if err := codec.WriteUint8(id); err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 		if err := codec.WriteTyped(v); err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 	}
 	return nil

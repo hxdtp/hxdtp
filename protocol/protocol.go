@@ -74,7 +74,7 @@ func Select(transport io.ReadWriter) (VersionedProtocol, error) {
 	var p [8]byte
 	_, err := io.ReadFull(transport, p[:])
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	protoname := p[:6]
 	version := Version{Major: p[6], Minor: p[7]}
@@ -85,14 +85,17 @@ func Select(transport io.ReadWriter) (VersionedProtocol, error) {
 	return Build(version, transport)
 }
 
-func Connect(version Version, transport io.ReadWriter) error {
-	_, err := transport.Write(name[:])
-	if err == nil {
-		if _, err = transport.Write(version.bytes()); err == nil {
-			if f, ok := transport.(Flusher); ok {
-				err = f.Flush()
-			}
+func Connect(version Version, transport io.ReadWriter) (VersionedProtocol, error) {
+	if _, err := transport.Write(name[:]); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if _, err := transport.Write(version.bytes()); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if f, ok := transport.(Flusher); ok {
+		if err := f.Flush(); err != nil {
+			return nil, errors.WithStack(err)
 		}
 	}
-	return err
+	return Build(version, transport)
 }
