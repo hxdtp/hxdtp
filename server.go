@@ -1,10 +1,8 @@
 package hxdtp
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"runtime/debug"
 	"sync"
@@ -16,19 +14,22 @@ import (
 	"github.com/hxdtp/hxdtp/protocol"
 )
 
+const (
+	defaultTimeout           = 5 * time.Second
+	defaultServerReadTimeout = 30 * time.Second
+)
+
+var (
+	ErrServerAlreadyStarted = fmt.Errorf("hxdtp: server already started")
+	ErrServerClosed         = fmt.Errorf("hxdtp: server closed")
+)
+
 type (
-	ServerRequest interface {
-		// TODO: method to get all kvs by prefix
-		Get(key string) interface{}
-		Body() io.Reader
-	}
-	ServerResponse interface {
-		Set(key string, value interface{}) ServerResponse
-		WithBlob(p []byte) ServerResponse
-		WithStream(rd io.LimitedReader) ServerResponse
-		WithFile(fsr FileSender) ServerResponse
-	}
-	ServerContext interface {
+	ServerRequest  readonlyMessager
+	ServerResponse writeableMessager
+	serverRequest  = readonlyMessage
+	serverResponse = writeableMessage
+	ServerContext  interface {
 		Ctx() context.Context
 		Set(key string, value interface{})
 		Get(key string) interface{}
@@ -37,43 +38,84 @@ type (
 	}
 )
 
-type ServerOptions struct {
-	ListenAddr      string
+type ServerConfig struct {
+	HandleFunc      HandleFunc
+	Middlewares     []HandleMiddleware
+	Parallel        bool
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	GracefulTimeout time.Duration
-	HandleFunc      HandleFunc
-	Parallel        bool
+}
+
+func (conf *ServerConfig) withDefaults() {
+	if conf.ReadTimeout <= 0 {
+		conf.ReadTimeout = defaultServerReadTimeout
+	}
+	if conf.WriteTimeout <= 0 {
+		conf.WriteTimeout = defaultTimeout
+	}
+	if conf.GracefulTimeout <= 0 {
+		conf.GracefulTimeout = defaultTimeout
+	}
 }
 
 type Server struct {
-	ctx  context.Context
-	opts ServerOptions
-	pool *serverContextPool
+	ctx        context.Context
+	cancel     context.CancelFunc
+	conf       ServerConfig
+	handleFunc HandleFunc
+	pool       *serverContextPool
 
-	l      net.Listener
-	wg     sync.WaitGroup
-	closed int32
+	l       net.Listener
+	wg      sync.WaitGroup
+	started int32
+	closed  int32
 }
 
-func NewServer(ctx context.Context, opts ServerOptions) (*Server, error) {
-	l, err := net.Listen("tcp", opts.ListenAddr)
+func NewServer(laddr string, conf ServerConfig) (*Server, error) {
+	l, err := net.Listen("tcp", laddr)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	// TODO(damnever): check if context canceled
-	return &Server{
-		ctx:  ctx,
-		opts: opts,
-		pool: newServerContextPool(),
-		l:    l,
-	}, nil
+	return NewServerWithListener(l, conf)
 }
 
-// TODO(damnever): NewServerWithListener
+func NewServerWithListener(l net.Listener, conf ServerConfig) (*Server, error) {
+	if conf.HandleFunc == nil {
+		return nil, fmt.Errorf("hxdtp: HandleFunc required")
+	}
+	(&conf).withDefaults()
+	handleFunc := conf.HandleFunc
+	for i := len(conf.Middlewares) - 1; i >= 0; i-- {
+		handleFunc = conf.Middlewares[i](handleFunc)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{
+		ctx:        ctx,
+		cancel:     cancel,
+		conf:       conf,
+		handleFunc: handleFunc,
+		pool:       newServerContextPool(),
+		l:          l,
+	}
+	go func() {
+		<-ctx.Done()
+		s.Close()
+	}()
+	return s, nil
+}
 
 func (s *Server) Serve() error {
+	if !atomic.CompareAndSwapInt32(&s.started, 0, 1) {
+		return ErrServerAlreadyStarted
+	}
+
 	for {
+		if atomic.LoadInt32(&s.closed) == 1 {
+			return ErrServerClosed
+		}
+
 		conn, err := s.l.Accept()
 		if err != nil {
 			return errors.WithStack(err)
@@ -87,14 +129,16 @@ func (s *Server) Close() error {
 	if !atomic.CompareAndSwapInt32(&s.closed, 0, 1) {
 		return nil
 	}
+	s.cancel()
 	err := s.l.Close()
+
 	donec := make(chan struct{})
 	go func() {
 		s.wg.Wait()
 		close(donec)
 	}()
 	select {
-	case <-time.After(s.opts.GracefulTimeout):
+	case <-time.After(s.conf.GracefulTimeout):
 	case <-donec:
 	}
 	return errors.WithStack(err)
@@ -114,7 +158,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		panic("TODO")
 	}
 
-	if s.opts.Parallel {
+	if s.conf.Parallel {
 		s.handleRequestsParallel(conn, proto)
 	} else {
 		s.handleRequestsSequential(conn, proto)
@@ -124,7 +168,7 @@ func (s *Server) handleConn(conn net.Conn) {
 func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.VersionedProtocol) {
 	for {
 		func() {
-			if err := conn.SetDeadline(time.Now().Add(s.opts.ReadTimeout)); err != nil {
+			if err := conn.SetDeadline(time.Now().Add(s.conf.ReadTimeout)); err != nil {
 				panic(err)
 			}
 			msg, err := proto.ReadMessage()
@@ -136,10 +180,10 @@ func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.Versione
 			svrctx := s.pool.Get()
 			defer s.pool.Put(svrctx)
 			svrctx.Reset(s.ctx, msg, proto.NewMessageFrom(msg))
-			if err := s.opts.HandleFunc(svrctx); err != nil {
+			if err := s.handleFunc(svrctx); err != nil {
 				panic(err)
 			}
-			if err := conn.SetWriteDeadline(time.Now().Add(s.opts.WriteTimeout)); err != nil {
+			if err := conn.SetWriteDeadline(time.Now().Add(s.conf.WriteTimeout)); err != nil {
 				panic(err)
 			}
 			if err := proto.WriteMessage(svrctx.response.tomsg()); err != nil {
@@ -154,59 +198,7 @@ func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.Versione
 
 func (s *Server) handleRequestsParallel(conn net.Conn, proto protocol.VersionedProtocol) {
 	// TODO
-}
-
-type serverRequest struct {
-	protocol.Message
-}
-
-func (r serverRequest) Get(key string) interface{} {
-	return r.Message.Headers().Get(key)
-}
-
-func (r serverRequest) Body() io.Reader {
-	return r.Message.Body().R
-}
-
-type serverResponse struct {
-	protocol.Message
-	rdc *readerChain
-}
-
-func (r *serverResponse) reset(msg protocol.Message) {
-	r.Message = msg
-	if r.rdc == nil {
-		r.rdc = &readerChain{}
-	}
-	r.rdc.Reset()
-}
-
-func (r *serverResponse) tomsg() protocol.Message {
-	r.Message.SetBody(io.LimitedReader{
-		R: r.rdc,
-		N: r.rdc.size,
-	})
-	return r.Message
-}
-
-func (r *serverResponse) Set(key string, value interface{}) ServerResponse {
-	r.Message.Headers().Set(key, value)
-	return r
-}
-
-func (r *serverResponse) WithBlob(p []byte) ServerResponse {
-	r.rdc.Append(bytes.NewBuffer(p), int64(len(p)))
-	return r
-}
-
-func (r *serverResponse) WithStream(rd io.LimitedReader) ServerResponse {
-	r.rdc.Append(rd.R, rd.N)
-	return r
-}
-
-func (r *serverResponse) WithFile(fsr FileSender) ServerResponse {
-	r.rdc.Append(fileSender{fsr}, fsr.Count())
-	return r
+	panic("TODO")
 }
 
 type serverContext struct {

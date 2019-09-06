@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/pkg/errors"
 )
@@ -50,20 +51,36 @@ func (v Version) bytes() []byte {
 }
 
 var (
-	name      = [...]byte{'H', 'X', 'D', 'T', 'P', '-'}
-	protocols = map[uint8]VersionedProtocolBuilder{}
+	identify = [...]byte{'H', 'X', 'D', 'T', 'P', '-'}
+	registry = &struct {
+		sync.RWMutex
+		protocols map[uint8]VersionedProtocolBuilder
+	}{
+		protocols: map[uint8]VersionedProtocolBuilder{},
+	}
 )
 
+func Registered(version Version) bool {
+	registry.RLock()
+	_, ok := registry.protocols[version.Major]
+	registry.RUnlock()
+	return ok
+}
+
 func Register(version Version, builder VersionedProtocolBuilder) {
+	registry.Lock()
+	defer registry.Unlock()
 	major := version.Major
-	if _, ok := protocols[major]; ok {
+	if _, ok := registry.protocols[major]; ok {
 		panic(fmt.Sprintf("Major version '%x' has been registered", major))
 	}
-	protocols[major] = builder
+	registry.protocols[major] = builder
 }
 
 func Build(version Version, transport io.ReadWriter) (VersionedProtocol, error) {
-	builder, ok := protocols[version.Major]
+	registry.RLock()
+	builder, ok := registry.protocols[version.Major]
+	registry.RUnlock()
 	if !ok {
 		return nil, errors.Errorf("Unknown/unregistered protocol version '%+v'", version)
 	}
@@ -79,14 +96,14 @@ func Select(transport io.ReadWriter) (VersionedProtocol, error) {
 	protoname := p[:6]
 	version := Version{Major: p[6], Minor: p[7]}
 
-	if !bytes.Equal(protoname, name[:]) {
+	if !bytes.Equal(protoname, identify[:]) {
 		return nil, errors.Errorf("Unknown protocol name '%s'", protoname)
 	}
 	return Build(version, transport)
 }
 
 func Connect(version Version, transport io.ReadWriter) (VersionedProtocol, error) {
-	if _, err := transport.Write(name[:]); err != nil {
+	if _, err := transport.Write(identify[:]); err != nil {
 		return nil, errors.WithStack(err)
 	}
 	if _, err := transport.Write(version.bytes()); err != nil {

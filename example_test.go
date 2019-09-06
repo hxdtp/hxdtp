@@ -28,8 +28,7 @@ func Example() {
 	}
 
 	addr := "localhost:31994"
-	svr, err := NewServer(context.TODO(), ServerOptions{
-		ListenAddr:      addr,
+	svr, err := NewServer(addr, ServerConfig{
 		ReadTimeout:     5 * time.Second,
 		WriteTimeout:    time.Second,
 		GracefulTimeout: time.Second,
@@ -45,7 +44,6 @@ func Example() {
 			ctx.Response().WithBlob(buf.Bytes())
 			return nil
 		},
-		Parallel: false,
 	})
 	must(err)
 	go svr.Serve()
@@ -53,12 +51,11 @@ func Example() {
 
 	time.Sleep(100 * time.Millisecond)
 
-	cli, err := NewClient(ClientOptions{
-		RemoteAddr:     addr,
-		ProtoVersion:   protov1.Version(),
-		ConnectTimeout: time.Second,
-		ReadTimeout:    time.Second,
-		WriteTimeout:   time.Second,
+	cli, err := NewClient(addr, ClientConfig{
+		ProtoVersion: protov1.Version(),
+		DialTimeout:  time.Second,
+		ReadTimeout:  time.Second,
+		WriteTimeout: time.Second,
 	})
 	must(err)
 	defer cli.Close()
