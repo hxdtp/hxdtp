@@ -13,51 +13,77 @@ import (
 )
 
 type (
-	ClientRequest  ServerResponse
-	ClientResponse ServerRequest
-	clientRequest  = serverResponse
-	clientResponse = serverRequest
-
-	ClientOptions struct {
-		RemoteAddr     string
-		ProtoVersion   protocol.Version
-		ConnectTimeout time.Duration
-		ReadTimeout    time.Duration
-		WriteTimeout   time.Duration
-	}
+	ClientRequest  writeableMessager
+	ClientResponse readonlyMessager
+	clientRequest  = writeableMessage
+	clientResponse = readonlyMessage
 )
 
 var (
-	ErrSeqIDExhausted = fmt.Errorf("sequence id exhausted")
+	ErrSeqIDExhausted = fmt.Errorf("hxdtp: sequence id exhausted")
 )
 
+type ClientConfig struct {
+	ProtoVersion protocol.Version
+	DialTimeout  time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	Middlewares  []CallMiddleware
+}
+
+func (conf *ClientConfig) withDefaults() {
+	if conf.DialTimeout <= 0 {
+		conf.DialTimeout = defaultTimeout
+	}
+	if conf.ReadTimeout <= 0 {
+		conf.ReadTimeout = defaultTimeout
+	}
+	if conf.WriteTimeout <= 0 {
+		conf.WriteTimeout = defaultTimeout
+	}
+}
+
 type Client struct {
-	opts  ClientOptions
+	conf     ClientConfig
+	callFunc CallFunc
+
 	seqid uint64
 	conn  net.Conn
 	proto protocol.VersionedProtocol
 }
 
-func NewClient(opts ClientOptions) (*Client, error) {
-	dialer := net.Dialer{Timeout: opts.ConnectTimeout}
-	conn, err := dialer.Dial("tcp", opts.RemoteAddr)
+func NewClient(raddr string, conf ClientConfig) (*Client, error) {
+	dialer := net.Dialer{Timeout: conf.DialTimeout}
+	conn, err := dialer.Dial("tcp", raddr)
 	if err != nil {
 		return nil, err
 	}
-	proto, err := protocol.Connect(opts.ProtoVersion, newBufferedTransport(conn))
+	return NewClientWithConn(conn, conf)
+}
+
+func NewClientWithConn(conn net.Conn, conf ClientConfig) (*Client, error) {
+	if !protocol.Registered(conf.ProtoVersion) {
+		return nil, fmt.Errorf("hxdtp: protocol version not registered")
+	}
+	(&conf).withDefaults()
+	proto, err := protocol.Connect(conf.ProtoVersion, newBufferedTransport(conn))
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	return &Client{
-		opts:  opts,
+
+	c := &Client{
+		conf:  conf,
 		seqid: 0,
 		conn:  conn,
 		proto: proto,
-	}, nil
+	}
+	c.callFunc = c.call
+	for i := len(conf.Middlewares) - 1; i >= 0; i-- {
+		c.callFunc = conf.Middlewares[i](c.callFunc)
+	}
+	return c, nil
 }
-
-// TODO(damnever): NewClientWithConn
 
 func (c *Client) NewRequest() (ClientRequest, error) {
 	clireq := c.proto.NewMessage()
@@ -71,18 +97,22 @@ func (c *Client) NewRequest() (ClientRequest, error) {
 }
 
 func (c *Client) Call(ctx context.Context, req ClientRequest) (ClientResponse, error) {
+	return c.callFunc(ctx, req)
+}
+
+func (c *Client) call(ctx context.Context, req ClientRequest) (ClientResponse, error) {
 	clireq, ok := req.(*clientRequest)
 	if !ok {
 		return nil, ErrSeqIDExhausted
 	}
 
-	if err := c.conn.SetWriteDeadline(time.Now().Add(c.opts.WriteTimeout)); err != nil {
+	if err := c.conn.SetWriteDeadline(deadline(ctx, c.conf.WriteTimeout)); err != nil {
 		return nil, errors.WithStack(err)
 	}
 	if err := c.proto.WriteMessage(clireq.tomsg()); err != nil {
 		return nil, err
 	}
-	if err := c.conn.SetReadDeadline(time.Now().Add(c.opts.ReadTimeout)); err != nil {
+	if err := c.conn.SetReadDeadline(deadline(ctx, c.conf.ReadTimeout)); err != nil {
 		return nil, errors.WithStack(err)
 	}
 	cliresp, err := c.proto.ReadMessage()
@@ -103,4 +133,12 @@ func newClientRequst(msg protocol.Message) *clientRequest {
 	req := &clientRequest{}
 	req.reset(msg)
 	return req
+}
+
+func deadline(ctx context.Context, duration time.Duration) time.Time {
+	max := time.Now().Add(duration)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(max) {
+		return dl
+	}
+	return max
 }
