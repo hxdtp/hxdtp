@@ -143,8 +143,10 @@ func (p *proto) writeMsg(m message) error {
 	if _, err := p.transport.Write(header); err != nil {
 		return errors.WithStack(err)
 	}
-	if _, err := io.CopyBuffer(p.transport, m.body.R, p.bbuf[:]); err != nil {
-		return errors.WithStack(err)
+	if m.body.N > 0 {
+		if _, err := io.CopyBuffer(p.transport, m.body.R, p.bbuf[:]); err != nil {
+			return errors.WithStack(err)
+		}
 	}
 	if f, ok := p.transport.(protocol.Flusher); ok {
 		if err := f.Flush(); err != nil {

@@ -21,13 +21,15 @@ func Example() {
 	protocol.Register(protov1.Version(), protov1.Builder(protov1.WithKeyTable(map[string]uint8{
 		"Method": 0,
 	})))
+	defer protocol.Deregister(protov1.Version())
 	must := func(err error) {
 		if err != nil {
 			panic(err)
 		}
 	}
 
-	addr := "localhost:31994"
+	addr, err := listenAddr() // Random listen address.
+	must(err)
 	svr, err := NewServer(addr, ServerConfig{
 		ReadTimeout:     5 * time.Second,
 		WriteTimeout:    time.Second,
@@ -37,8 +39,8 @@ func Example() {
 			buf := &bytes.Buffer{}
 			buf.WriteString(ctx.Request().Get("X-Whatever").(string))
 			buf.WriteString(" - ")
-			if _, err := io.Copy(buf, ctx.Request().Body()); err != nil {
-				return err
+			if _, err0 := io.Copy(buf, ctx.Request().Body()); err != nil {
+				return err0
 			}
 			buf.WriteString(" - TODO")
 			ctx.Response().WithBlob(buf.Bytes())

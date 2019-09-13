@@ -72,9 +72,15 @@ func Register(version Version, builder VersionedProtocolBuilder) {
 	defer registry.Unlock()
 	major := version.Major
 	if _, ok := registry.protocols[major]; ok {
-		panic(fmt.Sprintf("Major version '%x' has been registered", major))
+		panic(fmt.Sprintf("hxdtp/protocol: major version '%x' has been registered", major))
 	}
 	registry.protocols[major] = builder
+}
+
+func Deregister(version Version) {
+	registry.Lock()
+	delete(registry.protocols, version.Major)
+	registry.Unlock()
 }
 
 func Build(version Version, transport io.ReadWriter) (VersionedProtocol, error) {
@@ -82,7 +88,7 @@ func Build(version Version, transport io.ReadWriter) (VersionedProtocol, error) 
 	builder, ok := registry.protocols[version.Major]
 	registry.RUnlock()
 	if !ok {
-		return nil, errors.Errorf("Unknown/unregistered protocol version '%+v'", version)
+		return nil, errors.Errorf("hxdtp/protocol: unknown/unregistered protocol version '%+v'", version)
 	}
 	return builder(version, transport), nil
 }
@@ -97,7 +103,7 @@ func Select(transport io.ReadWriter) (VersionedProtocol, error) {
 	version := Version{Major: p[6], Minor: p[7]}
 
 	if !bytes.Equal(protoname, identify[:]) {
-		return nil, errors.Errorf("Unknown protocol name '%s'", protoname)
+		return nil, errors.Errorf("hxdtp/protocol: unknown protocol name '%s'", protoname)
 	}
 	return Build(version, transport)
 }
