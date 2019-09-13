@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	defaultTimeout           = 5 * time.Second
+	optionMultiplex = "m"
+
+	defaultReadTimeout       = 3 * time.Second
+	defaultWriteTimeout      = 100 * time.Millisecond
 	defaultServerReadTimeout = 30 * time.Second
 )
 
@@ -41,7 +44,7 @@ type (
 type ServerConfig struct {
 	HandleFunc      HandleFunc
 	Middlewares     []HandleMiddleware
-	Parallel        bool
+	Concurrency     int
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	GracefulTimeout time.Duration
@@ -52,12 +55,14 @@ func (conf *ServerConfig) withDefaults() {
 		conf.ReadTimeout = defaultServerReadTimeout
 	}
 	if conf.WriteTimeout <= 0 {
-		conf.WriteTimeout = defaultTimeout
+		conf.WriteTimeout = defaultWriteTimeout
 	}
 	if conf.GracefulTimeout <= 0 {
-		conf.GracefulTimeout = defaultTimeout
+		conf.GracefulTimeout = 5 * time.Second
 	}
 }
+
+// TODO: test and optimize the concurrency model.
 
 type Server struct {
 	ctx        context.Context
@@ -82,7 +87,7 @@ func NewServer(laddr string, conf ServerConfig) (*Server, error) {
 
 func NewServerWithListener(l net.Listener, conf ServerConfig) (*Server, error) {
 	if conf.HandleFunc == nil {
-		return nil, fmt.Errorf("hxdtp: HandleFunc required")
+		return nil, errors.Errorf("hxdtp: HandleFunc required")
 	}
 	(&conf).withDefaults()
 	handleFunc := conf.HandleFunc
@@ -153,12 +158,34 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.wg.Done()
 	}()
 
+	// TODO(damnever): resuse transport
 	proto, err := protocol.Select(newBufferedTransport(conn))
 	if err != nil {
 		panic("TODO")
 	}
 
-	if s.conf.Parallel {
+	if err = conn.SetDeadline(time.Now().Add(s.conf.ReadTimeout)); err != nil {
+		panic(err)
+	}
+	msg, err := proto.ReadMessage()
+	if err != nil {
+		return
+	}
+	respmsg := proto.NewMessageFrom(msg)
+	multiplex := false
+	if v, ok := msg.Headers().Get(optionMultiplex).(int64); ok && v == 1 {
+		multiplex = true
+		respmsg.Headers().Set(optionMultiplex, 1)
+	} else {
+		respmsg.Headers().Set(optionMultiplex, 0)
+	}
+	if err = conn.SetWriteDeadline(time.Now().Add(s.conf.WriteTimeout)); err != nil {
+		panic(err)
+	}
+	if err = proto.WriteMessage(respmsg); err != nil {
+		panic(err)
+	}
+	if multiplex {
 		s.handleRequestsParallel(conn, proto)
 	} else {
 		s.handleRequestsSequential(conn, proto)
@@ -197,8 +224,65 @@ func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.Versione
 }
 
 func (s *Server) handleRequestsParallel(conn net.Conn, proto protocol.VersionedProtocol) {
-	// TODO
-	panic("TODO")
+	rproto := proto
+	wproto, err := protocol.Build(proto.Version(), newBufferedTransport(conn))
+	if err != nil {
+		return
+	}
+
+	wg := sync.WaitGroup{}
+	respc := make(chan *serverContext)
+	defer func() {
+		wg.Wait()
+		close(respc)
+	}()
+	go func() {
+		var err error
+		// TODO(damnever)
+		for svrctx := range respc {
+			if err != nil {
+				goto RELEASE_CTX
+			}
+			if err = conn.SetWriteDeadline(time.Now().Add(s.conf.WriteTimeout)); err != nil {
+				// TODO
+				goto RELEASE_CTX
+			}
+			if err = wproto.WriteMessage(svrctx.response.tomsg()); err != nil {
+				// TODO
+				goto RELEASE_CTX
+			}
+		RELEASE_CTX:
+			s.pool.Put(svrctx)
+		}
+	}()
+
+	for {
+		if err := conn.SetDeadline(time.Now().Add(s.conf.ReadTimeout)); err != nil {
+			panic(err)
+		}
+		msg, err := rproto.ReadMessage()
+		if err != nil {
+			// TODO: hook for logging/metrics...
+			return
+		}
+		svrctx := s.pool.Get()
+		svrctx.Reset(s.ctx, msg, proto.NewMessageFrom(msg))
+		// TODO: pooling
+		wg.Add(1)
+		go func(svrctx *serverContext) {
+			defer wg.Done()
+			if err := s.handleFunc(svrctx); err != nil {
+				panic(err)
+			}
+			select {
+			case respc <- svrctx:
+			case <-s.ctx.Done():
+			}
+		}(svrctx)
+		if atomic.LoadInt32(&s.closed) == 1 {
+			return
+		}
+	}
 }
 
 type serverContext struct {
