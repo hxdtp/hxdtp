@@ -23,6 +23,11 @@ func newHeaders(keytbl KeyTable) headers {
 	}
 }
 
+func (h headers) Reset() {
+	h.static.Reset()
+	h.dynamic.Reset()
+}
+
 func (h headers) Get(key string) interface{} {
 	var val xdcodec.Typed
 	if h.keytbl.HasKey(key) {
