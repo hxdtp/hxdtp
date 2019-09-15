@@ -25,11 +25,19 @@ type readonlyMessage struct {
 	protocol.Message
 }
 
-func (r readonlyMessage) Get(key string) interface{} {
+func newReadonlyMessage(raw protocol.Message) *readonlyMessage {
+	return &readonlyMessage{Message: raw}
+}
+
+func (r *readonlyMessage) reset() {
+	r.Message.Reset()
+}
+
+func (r *readonlyMessage) Get(key string) interface{} {
 	return r.Message.Headers().Get(key)
 }
 
-func (r readonlyMessage) Body() io.Reader {
+func (r *readonlyMessage) Body() io.Reader {
 	return r.Message.Body().R
 }
 
@@ -38,11 +46,15 @@ type writeableMessage struct {
 	rdc *readerChain
 }
 
-func (m *writeableMessage) reset(msg protocol.Message) {
-	m.Message = msg
-	if m.rdc == nil {
-		m.rdc = &readerChain{}
+func newWriteableMessage(raw protocol.Message) *writeableMessage {
+	return &writeableMessage{
+		Message: raw,
+		rdc:     &readerChain{},
 	}
+}
+
+func (m *writeableMessage) reset() {
+	m.Message.Reset()
 	m.rdc.Reset()
 }
 

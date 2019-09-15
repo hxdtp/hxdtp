@@ -19,7 +19,7 @@ import (
 )
 
 func TestMultiplexing(t *testing.T) {
-	protocol.Register(protov1.Version(), protov1.Builder(protov1.WithKeyTable(map[string]uint8{
+	protocol.Register(protov1.Version(), protov1.NewBuilder(protov1.WithKeyTable(map[string]uint8{
 		"method": 0,
 		"sleep":  1,
 	})))

@@ -25,6 +25,9 @@ const (
 var (
 	ErrServerAlreadyStarted = fmt.Errorf("hxdtp: server already started")
 	ErrServerClosed         = fmt.Errorf("hxdtp: server closed")
+
+	newServerResponse = newWriteableMessage
+	newServerRequst   = newReadonlyMessage
 )
 
 type (
@@ -69,7 +72,7 @@ type Server struct {
 	cancel     context.CancelFunc
 	conf       ServerConfig
 	handleFunc HandleFunc
-	pool       *serverContextPool
+	pools      *serverContextPools
 
 	l       net.Listener
 	wg      sync.WaitGroup
@@ -101,7 +104,7 @@ func NewServerWithListener(l net.Listener, conf ServerConfig) (*Server, error) {
 		cancel:     cancel,
 		conf:       conf,
 		handleFunc: handleFunc,
-		pool:       newServerContextPool(),
+		pools:      newServerContextPools(),
 		l:          l,
 	}
 	go func() {
@@ -159,21 +162,24 @@ func (s *Server) handleConn(conn net.Conn) {
 	}()
 
 	// TODO(damnever): resuse transport
-	proto, err := protocol.Select(newBufferedTransport(conn))
+	proto, err := protocol.SelectProtocol(newBufferedTransport(conn))
 	if err != nil {
 		panic("TODO")
 	}
 
+	svrctx := s.pools.Get(proto.Version())
+	defer s.pools.Put(svrctx)
 	if err = conn.SetDeadline(time.Now().Add(s.conf.ReadTimeout)); err != nil {
 		panic(err)
 	}
-	msg, err := proto.ReadMessage()
-	if err != nil {
+	reqmsg := svrctx.RawRequestMessage()
+	if err = proto.ReadMessage(reqmsg); err != nil {
 		return
 	}
-	respmsg := proto.NewMessageFrom(msg)
+	respmsg := svrctx.RawResponseMessage()
+	respmsg.SetSeqID(reqmsg.SeqID())
 	multiplex := false
-	if v, ok := msg.Headers().Get(optionMultiplex).(int64); ok && v == 1 {
+	if v, ok := reqmsg.Headers().Get(optionMultiplex).(int64); ok && v == 1 {
 		multiplex = true
 		respmsg.Headers().Set(optionMultiplex, 1)
 	} else {
@@ -193,20 +199,22 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.VersionedProtocol) {
+	version := proto.Version()
 	for {
 		func() {
 			if err := conn.SetDeadline(time.Now().Add(s.conf.ReadTimeout)); err != nil {
 				panic(err)
 			}
-			msg, err := proto.ReadMessage()
-			if err != nil {
+			svrctx := s.pools.Get(version)
+			svrctx.WithCtx(s.ctx)
+			defer s.pools.Put(svrctx)
+			reqmsg := svrctx.RawRequestMessage()
+			if err := proto.ReadMessage(reqmsg); err != nil {
 				// TODO: hook for logging/metrics...
 				return
 			}
 			// TODO
-			svrctx := s.pool.Get()
-			defer s.pool.Put(svrctx)
-			svrctx.Reset(s.ctx, msg, proto.NewMessageFrom(msg))
+			svrctx.RawResponseMessage().SetSeqID(reqmsg.SeqID())
 			if err := s.handleFunc(svrctx); err != nil {
 				panic(err)
 			}
@@ -224,8 +232,9 @@ func (s *Server) handleRequestsSequential(conn net.Conn, proto protocol.Versione
 }
 
 func (s *Server) handleRequestsParallel(conn net.Conn, proto protocol.VersionedProtocol) {
+	version := proto.Version()
 	rproto := proto
-	wproto, err := protocol.Build(proto.Version(), newBufferedTransport(conn))
+	wproto, err := protocol.NewProtocol(version, newBufferedTransport(conn))
 	if err != nil {
 		return
 	}
@@ -252,7 +261,7 @@ func (s *Server) handleRequestsParallel(conn net.Conn, proto protocol.VersionedP
 				goto RELEASE_CTX
 			}
 		RELEASE_CTX:
-			s.pool.Put(svrctx)
+			s.pools.Put(svrctx)
 		}
 	}()
 
@@ -260,13 +269,14 @@ func (s *Server) handleRequestsParallel(conn net.Conn, proto protocol.VersionedP
 		if err := conn.SetDeadline(time.Now().Add(s.conf.ReadTimeout)); err != nil {
 			panic(err)
 		}
-		msg, err := rproto.ReadMessage()
-		if err != nil {
-			// TODO: hook for logging/metrics...
+		svrctx := s.pools.Get(version)
+		svrctx.WithCtx(s.ctx)
+		reqmsg := svrctx.RawRequestMessage()
+		if err := rproto.ReadMessage(reqmsg); err != nil {
+			// TODO: put context back & hook for logging/metrics...
 			return
 		}
-		svrctx := s.pool.Get()
-		svrctx.Reset(s.ctx, msg, proto.NewMessageFrom(msg))
+		svrctx.RawResponseMessage().SetSeqID(reqmsg.SeqID())
 		// TODO: pooling
 		wg.Add(1)
 		go func(svrctx *serverContext) {
@@ -292,31 +302,53 @@ type serverContext struct {
 	ml   sync.RWMutex
 	meta map[string]interface{}
 
-	request  serverRequest
+	version  protocol.Version
+	request  *serverRequest
 	response *serverResponse
 }
 
-func newServerContext() *serverContext {
+func newServerContext(version protocol.Version) *serverContext {
+	reqmsg, err := protocol.NewMessage(version)
+	if err != nil { // Since the protocol already registered
+		panic(err)
+	}
+	respmsg, err := protocol.NewMessage(version)
+	if err != nil {
+		panic(err)
+	}
 	return &serverContext{
 		meta:     map[string]interface{}{},
-		response: &serverResponse{},
+		request:  newServerRequst(reqmsg),
+		response: newServerResponse(respmsg),
 	}
 }
 
-func (sctx *serverContext) Reset(stdctx context.Context, req, resp protocol.Message) {
+func (sctx *serverContext) Version() protocol.Version {
+	return sctx.version
+}
+
+func (sctx *serverContext) RawRequestMessage() protocol.Message {
+	return sctx.request.Message
+}
+
+func (sctx *serverContext) RawResponseMessage() protocol.Message {
+	return sctx.response.Message
+}
+
+func (sctx *serverContext) WithCtx(stdctx context.Context) {
+	subctx, cancel := context.WithCancel(stdctx)
+	sctx.stdctx = subctx
+	sctx.cancel = cancel
+}
+
+func (sctx *serverContext) Reset() {
 	if sctx.cancel != nil {
 		sctx.cancel()
 	}
-	if stdctx == nil {
-		sctx.stdctx = nil
-		sctx.cancel = nil
-	} else {
-		subctx, cancel := context.WithCancel(stdctx)
-		sctx.stdctx = subctx
-		sctx.cancel = cancel
-	}
-	sctx.request.Message = req
-	sctx.response.reset(resp)
+	sctx.stdctx = nil
+	sctx.cancel = nil
+	sctx.request.reset()
+	sctx.response.reset()
 	for k := range sctx.meta {
 		delete(sctx.meta, k)
 	}
@@ -347,25 +379,44 @@ func (sctx *serverContext) Get(key string) interface{} {
 	return val
 }
 
-type serverContextPool struct {
-	pool sync.Pool
+type serverContextPools struct {
+	l     sync.RWMutex
+	pools map[protocol.Version]*sync.Pool
 }
 
-func newServerContextPool() *serverContextPool {
-	return &serverContextPool{
-		pool: sync.Pool{
-			New: func() interface{} {
-				return newServerContext()
-			},
-		},
+func newServerContextPools() *serverContextPools {
+	return &serverContextPools{
+		pools: map[protocol.Version]*sync.Pool{},
 	}
 }
 
-func (p *serverContextPool) Get() *serverContext {
-	return p.pool.Get().(*serverContext)
+func (ps *serverContextPools) Get(version protocol.Version) *serverContext {
+	ps.l.RLock()
+	p, ok := ps.pools[version]
+	ps.l.RUnlock()
+	if ok {
+		return p.Get().(*serverContext)
+	}
+
+	ps.l.Lock()
+	defer ps.l.Unlock()
+	if p, ok = ps.pools[version]; ok {
+		return p.Get().(*serverContext)
+	}
+	p = &sync.Pool{
+		New: func() interface{} {
+			return newServerContext(version)
+		},
+	}
+	ps.pools[version] = p
+	return p.Get().(*serverContext)
 }
 
-func (p *serverContextPool) Put(ctx *serverContext) {
-	ctx.Reset(nil, nil, nil)
-	p.pool.Put(ctx)
+func (ps *serverContextPools) Put(ctx *serverContext) {
+	ctx.Reset()
+	ps.l.Lock()
+	if p, ok := ps.pools[ctx.Version()]; ok {
+		p.Put(ctx)
+	}
+	ps.l.Unlock()
 }

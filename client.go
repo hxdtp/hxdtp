@@ -25,6 +25,9 @@ type (
 var (
 	ErrClientClosed   = fmt.Errorf("hxdtp: client closed")
 	ErrSeqIDExhausted = fmt.Errorf("hxdtp: sequence id exhausted")
+
+	newClientRequst   = newWriteableMessage
+	newClientResponse = newReadonlyMessage
 )
 
 type ClientConfig struct {
@@ -72,7 +75,7 @@ func NewClientWithConn(conn net.Conn, conf ClientConfig) (*Client, error) {
 	}
 	(&conf).withDefaults()
 	// TODO(damnever): reuse transport
-	proto, err := protocol.Connect(conf.ProtoVersion, newBufferedTransport(conn))
+	proto, err := protocol.NewProtocolWithIdentify(conf.ProtoVersion, newBufferedTransport(conn))
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -112,7 +115,10 @@ func (c *Client) negotiate() error {
 }
 
 func (c *Client) NewRequest() (ClientRequest, error) {
-	clireq := c.proto.NewMessage()
+	clireq, err := protocol.NewMessage(c.conf.ProtoVersion)
+	if err != nil {
+		return nil, err
+	}
 	c.seqid++
 	if c.seqid >= math.MaxUint64 {
 		c.conn.Close()
@@ -141,14 +147,17 @@ func (c *Client) call(ctx context.Context, req ClientRequest) (ClientResponse, e
 	if err := c.conn.SetReadDeadline(deadline(ctx, c.conf.ReadTimeout)); err != nil {
 		return nil, errors.WithStack(err)
 	}
-	cliresp, err := c.proto.ReadMessage()
+	cliresp, err := protocol.NewMessage(c.conf.ProtoVersion)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.proto.ReadMessage(cliresp); err != nil {
 		return nil, err
 	}
 	if cliresp.SeqID() != clireq.SeqID() {
 		panic("hxdtp: seqid mismatch, non-multiplex client can not be called concurrently")
 	}
-	return clientResponse{cliresp}, nil
+	return newClientResponse(cliresp), nil
 }
 
 func (c *Client) Close() error {
@@ -166,7 +175,7 @@ type MultiplexClient struct {
 
 	regc   chan *clientSeqIDWithResponse
 	deregc chan uint64
-	respc  chan clientResponse
+	respc  chan *clientResponse
 	closed int32
 	stopc  chan struct{}
 	donec  chan struct{}
@@ -186,7 +195,7 @@ func NewMultiplexClientWithConn(conn net.Conn, conf ClientConfig) (*MultiplexCli
 		return nil, errors.Errorf("hxdtp: protocol version not registered")
 	}
 	(&conf).withDefaults()
-	proto, err := protocol.Connect(conf.ProtoVersion, newBufferedTransport(conn))
+	proto, err := protocol.NewProtocolWithIdentify(conf.ProtoVersion, newBufferedTransport(conn))
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -199,7 +208,7 @@ func NewMultiplexClientWithConn(conn net.Conn, conf ClientConfig) (*MultiplexCli
 		proto:  proto,
 		regc:   make(chan *clientSeqIDWithResponse),
 		deregc: make(chan uint64),
-		respc:  make(chan clientResponse),
+		respc:  make(chan *clientResponse),
 		closed: 0,
 		stopc:  make(chan struct{}),
 		donec:  make(chan struct{}),
@@ -217,25 +226,31 @@ func NewMultiplexClientWithConn(conn net.Conn, conf ClientConfig) (*MultiplexCli
 }
 
 func (c *MultiplexClient) negotiate() error {
-	req := c.proto.NewMessage()
-	req.SetSeqID(atomic.AddUint64(&c.seqid, 1))
-	req.Headers().Set(optionMultiplex, 1)
-
-	if err := c.conn.SetWriteDeadline(time.Now().Add(c.conf.WriteTimeout)); err != nil {
-		return errors.WithStack(err)
-	}
-	if err := c.proto.WriteMessage(req); err != nil {
-		return err
-	}
-	if err := c.conn.SetReadDeadline(time.Now().Add(c.conf.ReadTimeout)); err != nil {
-		return errors.WithStack(err)
-	}
-	resp, err := c.proto.ReadMessage()
+	req, err := protocol.NewMessage(c.conf.ProtoVersion)
 	if err != nil {
 		return err
 	}
+	req.SetSeqID(atomic.AddUint64(&c.seqid, 1))
+	req.Headers().Set(optionMultiplex, 1)
+
+	if err = c.conn.SetWriteDeadline(time.Now().Add(c.conf.WriteTimeout)); err != nil {
+		return errors.WithStack(err)
+	}
+	if err = c.proto.WriteMessage(req); err != nil {
+		return err
+	}
+	if err = c.conn.SetReadDeadline(time.Now().Add(c.conf.ReadTimeout)); err != nil {
+		return errors.WithStack(err)
+	}
+	resp, err := protocol.NewMessage(c.conf.ProtoVersion)
+	if err != nil {
+		return err
+	}
+	if err = c.proto.ReadMessage(resp); err != nil {
+		return err
+	}
 	if resp.SeqID() != req.SeqID() {
-		panic("hxdtp: seqid mismatch, non-multiplex client can not be called concurrently")
+		panic("hxdtp: seqid mismatch, negotiation failed")
 	}
 	if v, ok := resp.Headers().Get(optionMultiplex).(int64); !ok || v == 0 {
 		return errors.Errorf("hxdtp: server DOES NOT support multiplexing model")
@@ -244,7 +259,10 @@ func (c *MultiplexClient) negotiate() error {
 }
 
 func (c *MultiplexClient) NewRequest() (ClientRequest, error) {
-	clireq := c.proto.NewMessage()
+	clireq, err := protocol.NewMessage(c.conf.ProtoVersion)
+	if err != nil {
+		return nil, err
+	}
 	seqid := atomic.AddUint64(&c.seqid, 1)
 	if seqid == math.MaxUint64 {
 		c.conn.Close()
@@ -349,7 +367,7 @@ func (c *MultiplexClient) loop() {
 
 func (c *MultiplexClient) pull(errc chan<- error) {
 	// TODO(damnever): split buffered transport for beter resource utilization.
-	proto, err := protocol.Build(c.conf.ProtoVersion, newBufferedTransport(c.conn))
+	proto, err := protocol.NewProtocol(c.conf.ProtoVersion, newBufferedTransport(c.conn))
 	if err != nil {
 		errc <- err
 		return
@@ -358,15 +376,19 @@ func (c *MultiplexClient) pull(errc chan<- error) {
 		if atomic.LoadInt32(&c.closed) == 1 {
 			return
 		}
-		resp, err := proto.ReadMessage()
+		resp, err := protocol.NewMessage(c.conf.ProtoVersion)
 		if err != nil {
+			errc <- err
+			return // TODO
+		}
+		if err := proto.ReadMessage(resp); err != nil {
 			errc <- err
 			return
 		}
 		select {
 		case <-c.donec:
 			return
-		case c.respc <- clientResponse{resp}:
+		case c.respc <- newClientResponse(resp):
 		}
 	}
 }
@@ -380,12 +402,6 @@ func (c *MultiplexClient) Close() error {
 	return c.conn.Close()
 }
 
-func newClientRequst(msg protocol.Message) *clientRequest {
-	req := &clientRequest{}
-	req.reset(msg)
-	return req
-}
-
 func deadline(ctx context.Context, duration time.Duration) time.Time {
 	max := time.Now().Add(duration)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(max) {
@@ -396,7 +412,7 @@ func deadline(ctx context.Context, duration time.Duration) time.Time {
 
 type clientSeqIDWithResponse struct {
 	reqid uint64
-	resp  clientResponse
+	resp  *clientResponse
 	err   error
 	donec chan error
 }
