@@ -138,3 +138,6 @@ issues:
         - linters:
             - staticcheck
           text: "SA1012:"
+        - linters:
+            - gochecknoglobals
+          text: "`new"
