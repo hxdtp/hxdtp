@@ -13,30 +13,34 @@ import (
 )
 
 var (
-	version = protocol.Version{Major: 1, Minor: 0}
-
 	ErrUnknownRequestType = fmt.Errorf("unknown request type for current version")
+
+	version = protocol.Version{Major: 1, Minor: 0}
 )
 
 func Version() protocol.Version {
 	return version
 }
 
-// TODO(damnever): reuse message
+func NewBuilder(msgopts ...protocol.WithMessageOption) protocol.Builder {
+	// FIXME
+	return protocol.Builder{
+		NewMessage: func() (protocol.Message, error) {
+			return newMessage(msgopts...), nil
+		},
+		NewVersionedProtocol: func(_ protocol.Version, transport io.ReadWriter) (protocol.VersionedProtocol, error) {
+			return newProto(transport), nil
+		},
+	}
+}
 
-func WithKeyTable(tbl map[string]uint8) protocol.WithOption {
+func WithKeyTable(tbl map[string]uint8) protocol.WithMessageOption {
 	keytable, err := NewKeyTable(tbl)
 	if err != nil {
 		panic(err)
 	}
-	return func(p protocol.VersionedProtocol) {
-		p.(*proto).keytable = keytable
-	}
-}
-
-func Builder(opts ...protocol.WithOption) protocol.VersionedProtocolBuilder {
-	return func(_ protocol.Version, transport io.ReadWriter) protocol.VersionedProtocol {
-		return newProto(transport, opts...)
+	return func(m protocol.Message) {
+		m.(*message).keytable = keytable
 	}
 }
 
@@ -45,10 +49,9 @@ type proto struct {
 	codec     *xdcodec.Codec
 	buf       *bytes.Buffer
 	bbuf      [8192]byte
-	keytable  KeyTable
 }
 
-func newProto(transport io.ReadWriter, opts ...protocol.WithOption) protocol.VersionedProtocol {
+func newProto(transport io.ReadWriter, opts ...protocol.WithProtocolOption) protocol.VersionedProtocol {
 	p := &proto{
 		transport: transport,
 		codec:     xdcodec.New(binary.BigEndian, nil),
@@ -64,21 +67,16 @@ func (p *proto) Version() protocol.Version {
 	return version
 }
 
-func (p *proto) NewMessage() protocol.Message {
-	return newMessage(p.keytable)
-}
-
-func (p *proto) NewMessageFrom(req protocol.Message) protocol.Message {
-	msg := req.(*message)
-	m := newMessage(p.keytable)
-	m.SetSeqID(msg.SeqID())
-	return m
-}
-
-func (p *proto) ReadMessage() (protocol.Message, error) {
-	m := newMessage(p.keytable)
-	err := p.readMsg(m)
-	return m, err
+func (p *proto) ReadMessage(m protocol.Message) error {
+	rawm, ok := m.(*message)
+	if !ok {
+		return ErrUnknownRequestType
+	}
+	if rawm == nil {
+		return errors.Errorf("hxdtp/protocol/v1: unwritable message value")
+	}
+	err := p.readMsg(rawm)
+	return err
 }
 
 func (p *proto) WriteMessage(m protocol.Message) error {
@@ -157,14 +155,27 @@ func (p *proto) writeMsg(m message) error {
 }
 
 type message struct {
-	headers headers
-	body    io.LimitedReader
+	keytable KeyTable
+	headers  headers
+	body     io.LimitedReader
 
 	seqid uint64
 }
 
-func newMessage(keytable KeyTable) *message {
-	return &message{headers: newHeaders(keytable)}
+func newMessage(opts ...protocol.WithMessageOption) *message {
+	m := &message{}
+	for _, opts := range opts {
+		opts(m)
+	}
+	m.headers = newHeaders(m.keytable)
+	return m
+}
+
+func (m *message) Reset() {
+	m.body.R = nil
+	m.body.N = 0
+	m.seqid = 0
+	m.headers.Reset()
 }
 
 func (m *message) SeqID() uint64 {

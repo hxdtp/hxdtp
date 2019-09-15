@@ -18,7 +18,7 @@ func Example() {
 	// mapping relation in KeyTable if you do not known what you are
 	// doing, you can mark the useless one as reserved, in other words,
 	// name it as __RESERVED_XX__ until you can safely reuse it.
-	protocol.Register(protov1.Version(), protov1.Builder(protov1.WithKeyTable(map[string]uint8{
+	protocol.Register(protov1.Version(), protov1.NewBuilder(protov1.WithKeyTable(map[string]uint8{
 		"Method": 0,
 	})))
 	defer protocol.Deregister(protov1.Version())

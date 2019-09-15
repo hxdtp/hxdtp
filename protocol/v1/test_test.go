@@ -15,8 +15,8 @@ func TestProtocol(t *testing.T) {
 	buf := &bytes.Buffer{}
 	table := map[string]uint8{"Method": 1}
 
-	p := newProto(buf, WithKeyTable(table))
-	m := p.NewMessage()
+	p := newProto(buf)
+	m := newMessage(WithKeyTable(table))
 	m.SetSeqID(123)
 	m.Headers().Set("Method", "DEL")
 	m.Headers().Set("TAKE", "AWAY")
@@ -26,8 +26,9 @@ func TestProtocol(t *testing.T) {
 	m.SetBody(io.LimitedReader{R: bodyR, N: int64(bodyR.Len())})
 	require.Nil(t, p.WriteMessage(m))
 
-	p2 := newProto(bytes.NewBuffer(buf.Bytes()), WithKeyTable(table))
-	m2, err := p2.ReadMessage()
+	p2 := newProto(bytes.NewBuffer(buf.Bytes()))
+	m2 := newMessage(WithKeyTable(table))
+	err := p2.ReadMessage(m2)
 	require.Nil(t, err)
 
 	m.SetBody(io.LimitedReader{})
